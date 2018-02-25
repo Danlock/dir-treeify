@@ -2,149 +2,104 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-func copyFile(from, to string) (err error) {
-	in, err := os.Open(from)
-	if err != nil {
-		return
-	}
-	defer in.Close()
-
-	out, err := os.Create(to)
-	if err != nil {
-		return
-	}
-	defer func() {
-		if e := out.Close(); e != nil {
-			err = e
-		}
-	}()
-
-	_, err = io.Copy(out, in)
-	if err != nil {
-		return
-	}
-
-	err = out.Sync()
-	if err != nil {
-		return
-	}
-
-	si, err := os.Stat(from)
-	if err != nil {
-		return
-	}
-	err = os.Chmod(to, si.Mode())
-	if err != nil {
-		return
-	}
-
-	return
-}
-
-func copyDir(from, to string) (err error) {
-	src := filepath.Clean(from)
-	dst := filepath.Clean(to)
-
-	si, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	if !si.IsDir() {
-		return fmt.Errorf("source is not a directory")
-	}
-
-	_, err = os.Stat(dst)
-	if err != nil && !os.IsNotExist(err) {
-		return
-	}
-	if err == nil {
-		return fmt.Errorf("destination already exists")
-	}
-
-	err = os.MkdirAll(dst, si.Mode())
-	if err != nil {
-		return
-	}
-
-	entries, err := ioutil.ReadDir(src)
-	if err != nil {
-		return
-	}
-
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-
-		if entry.IsDir() {
-			err = copyDir(srcPath, dstPath)
-			if err != nil {
-				return
-			}
-		} else {
-			// Skip symlinks.
-			if entry.Mode()&os.ModeSymlink != 0 {
-				continue
-			}
-
-			err = copyFile(srcPath, dstPath)
-			if err != nil {
-				return
-			}
-		}
-	}
-
-	return
-}
-
-func consolidateFolders(inDirName, outDirName string) (err error) {
+func consolidateFolders(regex *regexp.Regexp, inDirName, outDirName string) (err error) {
 	inDirName = filepath.Clean(inDirName)
 	outDirName = filepath.Clean(outDirName)
 	files, err := ioutil.ReadDir(inDirName)
 	if err != nil {
-		log.Fatalf("Failed to read dir!\n%s", err)
+		return
 	}
+
+	errors := make(chan error, len(files))
 
 	for _, f := range files {
-		fName := strings.TrimSpace(f.Name())
-		if !strings.ContainsAny(fName, "[ & ]") {
-			log.Printf("invalid dir named %s! skipping...", fName)
-			continue
-		}
+		go func(f os.FileInfo) {
+			fName := strings.TrimSpace(f.Name())
+			if !strings.ContainsAny(fName, "[ & ]") {
+				errors <- fmt.Errorf("invalid dir named %s! skipping...", fName)
+				return
+			}
+			folderNames := regex.FindStringSubmatch(fName)
+			if folderNames == nil {
+				errors <- fmt.Errorf("Could not parse folder %s!", fName)
+				return
+			}
+			parentName := strings.ToLower(folderNames[1])
+			childName := strings.TrimSpace(folderNames[2])
 
-		locOfStartingBrace := strings.Index(fName, "[")
+			src := filepath.Join(inDirName, f.Name())
+			destParent := filepath.Join(outDirName, parentName)
+			dest := filepath.Join(outDirName, parentName, childName)
 
-		locOfEndingBrace := strings.LastIndex(fName, "]")
+			if err = os.MkdirAll(destParent, f.Mode()); err != nil {
+				return
+			}
 
-		folderName := fName[locOfStartingBrace+1 : locOfEndingBrace-1]
+			destInfo, err := os.Lstat(dest)
+			if err != nil && !os.IsNotExist(err) {
+				errors <- err
+				return
+			}
+			//If a symlink is already there, just delete it
+			if destInfo != nil && destInfo.Mode()&os.ModeSymlink != 0 {
+				if err := os.Remove(dest); err != nil {
+					errors <- err
+					return
+				}
+			}
 
-		if err := os.MkdirAll(filepath.Join(inDirName, folderName), os.ModeDir); err != nil {
-			log.Fatalf("Error creating dir %s!", folderName)
-		}
-
-		log.Printf("made %s dir!", folderName)
+			if err := os.Symlink(src, dest); err != nil {
+				errors <- fmt.Errorf("\nError symlinking dir %s to %s!\nError:%s", src, dest, err)
+				return
+			}
+			// log.Printf("Successfully linked to %s!", dest)
+			errors <- nil
+		}(f)
 	}
+	errCount := 0
+	for i := 0; i < len(files); i++ {
+		e := <-errors
+		if e != nil {
+			errCount++
+			log.Print(e)
+		}
+	}
+	log.Printf("Linked %d folders with %d errors!", len(files), errCount)
 	return
 }
 
 func main() {
+	var regex string
 	rootCLI := &cobra.Command{
-		Use:   "dir-sorter",
-		Short: "Reorganizing directories according to a pattern",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return consolidateFolders(args[0], args[1])
+		Use:   "dir-tree inputDir outputDir",
+		Short: "Restructure a folders subfolders via a regex pattern in their names.",
+		Long: `
+		If you had an inputDir that looks like so... 
+			Music -> [Big Shaq] Mans not Hot
+                              -> [Big Shaq] Fire in the booth
+		The outputDir could look like...
+			MusicByAuthor -> big shaq -> Mans not Hot
+                                                  -> Fire in the booth
+		`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			reg := regexp.MustCompile(regex)
+			if err := consolidateFolders(reg, args[0], args[1]); err != nil {
+				log.Fatalf("Error:%s", err)
+			}
 		},
 	}
+	rootCLI.PersistentFlags().StringVarP(&regex, "regex", "r", "\\[(.+?)\\](.+)", "Regex for splitting subdir according to 2 capture groups. The first will be used to create the directory under outputDir, second will be used for the subdirectory under that.")
 
 	if err := rootCLI.Execute(); err != nil {
 		log.Fatalf("Failure because %s!", err)
