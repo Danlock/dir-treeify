@@ -107,10 +107,13 @@ func copyDir(from, to string) (err error) {
 }
 
 func consolidateFolders(inDirName, outDirName string) (err error) {
+	inDirName = filepath.Clean(inDirName)
+	outDirName = filepath.Clean(outDirName)
 	files, err := ioutil.ReadDir(inDirName)
 	if err != nil {
 		log.Fatalf("Failed to read dir!\n%s", err)
 	}
+
 	for _, f := range files {
 		fName := strings.TrimSpace(f.Name())
 		if !strings.ContainsAny(fName, "[ & ]") {
@@ -122,14 +125,13 @@ func consolidateFolders(inDirName, outDirName string) (err error) {
 
 		locOfEndingBrace := strings.LastIndex(fName, "]")
 
-		dirName := fName[locOfStartingBrace+1 : locOfEndingBrace-1]
-		if _, err := os.Stat(inDirName + dirName); os.IsNotExist(err) {
-			if err := os.MkdirAll(inDirName+dirName, os.ModeDir); err != nil {
-				log.Fatalf("Error creating dir %s!", dirName)
-			}
-			log.Printf("made %s dir!", dirName)
+		folderName := fName[locOfStartingBrace+1 : locOfEndingBrace-1]
+
+		if err := os.MkdirAll(filepath.Join(inDirName, folderName), os.ModeDir); err != nil {
+			log.Fatalf("Error creating dir %s!", folderName)
 		}
 
+		log.Printf("made %s dir!", folderName)
 	}
 	return
 }
