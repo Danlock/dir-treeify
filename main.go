@@ -37,9 +37,9 @@ func consolidateFolders(regex *regexp.Regexp, inDirName, outDirName string) (err
 			parentName := strings.ToLower(folderNames[1])
 			childName := strings.TrimSpace(folderNames[2])
 
-			src := filepath.Join(inDirName, f.Name())
-			destParent := filepath.Join(outDirName, parentName)
-			dest := filepath.Join(outDirName, parentName, childName)
+			src, _ := filepath.Abs(filepath.Join(inDirName, f.Name()))
+			destParent, _ := filepath.Abs(filepath.Join(outDirName, parentName))
+			dest, _ := filepath.Abs(filepath.Join(outDirName, parentName, childName))
 
 			if err = os.MkdirAll(destParent, f.Mode()); err != nil {
 				return
