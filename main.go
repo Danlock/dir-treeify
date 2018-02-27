@@ -133,8 +133,6 @@ func main() {
 			flags.IgnoredChildren = strings.Split(flags.IgnoredChildrenString, " ")
 			flags.IgnoredParents = strings.Split(flags.IgnoredParentsString, " ")
 
-			log.Printf("Flags:%+v", flags)
-
 			if err := consolidateFolders(flags, args[0], args[1]); err != nil {
 				log.Fatalf("Error:%s", err)
 			}
