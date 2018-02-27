@@ -12,7 +12,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func consolidateFolders(regex *regexp.Regexp, inDirName, outDirName string) (err error) {
+type Flags struct {
+	RegexString           string
+	Regex                 *regexp.Regexp
+	IgnoredParents        []string
+	IgnoredParentsString  string
+	IgnoredChildren       []string
+	IgnoredChildrenString string
+}
+
+func consolidateFolders(flags Flags, inDirName, outDirName string) (err error) {
 	inDirName = filepath.Clean(inDirName)
 	outDirName = filepath.Clean(outDirName)
 	files, err := ioutil.ReadDir(inDirName)
@@ -21,7 +30,7 @@ func consolidateFolders(regex *regexp.Regexp, inDirName, outDirName string) (err
 	}
 
 	errors := make(chan error, len(files))
-
+	ignored := 0
 	for _, f := range files {
 		go func(f os.FileInfo) {
 			fName := strings.TrimSpace(f.Name())
@@ -29,17 +38,33 @@ func consolidateFolders(regex *regexp.Regexp, inDirName, outDirName string) (err
 				errors <- fmt.Errorf("invalid dir named %s! skipping...", fName)
 				return
 			}
-			folderNames := regex.FindStringSubmatch(fName)
+			folderNames := flags.Regex.FindStringSubmatch(fName)
 			if folderNames == nil {
 				errors <- fmt.Errorf("Could not parse folder %s!", fName)
 				return
 			}
 			var parentName, childName string
-			for i, v := range regex.SubexpNames() {
+			for i, v := range flags.Regex.SubexpNames() {
 				if v == "parent" {
 					parentName = strings.ToLower(folderNames[i])
 				} else if v == "child" {
 					childName = strings.TrimSpace(folderNames[i])
+				}
+			}
+
+			for _, v := range flags.IgnoredParents {
+				if strings.Contains(parentName, v) && v != "" {
+					ignored++
+					errors <- nil
+					return
+				}
+			}
+
+			for _, v := range flags.IgnoredChildren {
+				if strings.Contains(childName, v) && v != "" {
+					ignored++
+					errors <- nil
+					return
 				}
 			}
 
@@ -80,12 +105,12 @@ func consolidateFolders(regex *regexp.Regexp, inDirName, outDirName string) (err
 			log.Print(e)
 		}
 	}
-	log.Printf("Linked %d folders with %d errors!", len(files), errCount)
+	log.Printf("Linked %d folders with %d errors!", len(files)-ignored-errCount, errCount)
 	return
 }
 
 func main() {
-	var regex string
+	var flags Flags
 	rootCLI := &cobra.Command{
 		Use:   "dir-tree inputDir outputDir",
 		Short: "Restructure a folders subfolders via a regex pattern in their names.",
@@ -99,16 +124,25 @@ func main() {
 		`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
-			reg := regexp.MustCompile(regex)
+			reg := regexp.MustCompile(flags.RegexString)
 			if reg.NumSubexp() != 2 {
 				log.Fatalln("Regex missing parameter groups!")
 			}
-			if err := consolidateFolders(reg, args[0], args[1]); err != nil {
+			flags.Regex = reg
+
+			flags.IgnoredChildren = strings.Split(flags.IgnoredChildrenString, " ")
+			flags.IgnoredParents = strings.Split(flags.IgnoredParentsString, " ")
+
+			log.Printf("Flags:%+v", flags)
+
+			if err := consolidateFolders(flags, args[0], args[1]); err != nil {
 				log.Fatalf("Error:%s", err)
 			}
 		},
 	}
-	rootCLI.PersistentFlags().StringVarP(&regex, "regex", "r", `\[(?P<parent>.+?)\](?P<child>.+)`, "Regex for creating tree via 2 named capture groups called parent and child.")
+	rootCLI.PersistentFlags().StringVarP(&flags.RegexString, "regex", "r", `\[(?P<parent>.+?)\](?P<child>.+)`, "Regex for creating tree via 2 named capture groups called parent and child.")
+	rootCLI.PersistentFlags().StringVar(&flags.IgnoredParentsString, "ignore-parents", "", "Skips making any symlink parent that contains this string. Space delimited")
+	rootCLI.PersistentFlags().StringVar(&flags.IgnoredChildrenString, "ignore-children", "", "Skips making any symlink parent that contains this string. Space delimited")
 
 	if err := rootCLI.Execute(); err != nil {
 		log.Fatalf("Failure because %s!", err)
