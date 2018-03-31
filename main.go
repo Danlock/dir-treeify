@@ -1,13 +1,14 @@
 package main
 
 import (
-	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -29,18 +30,19 @@ func consolidateFolders(flags Flags, inDirName, outDirName string) (err error) {
 		return
 	}
 
-	errors := make(chan error, len(files))
-	ignored := 0
+	var ignored, errors, successes uint64
 	for _, f := range files {
 		go func(f os.FileInfo) {
 			fName := strings.TrimSpace(f.Name())
 			if !strings.ContainsAny(fName, "[ & ]") {
-				errors <- fmt.Errorf("invalid dir named %s! skipping...", fName)
+				atomic.AddUint64(&errors, 1)
+				log.Printf("invalid dir named %s! skipping...", fName)
 				return
 			}
 			folderNames := flags.Regex.FindStringSubmatch(fName)
 			if folderNames == nil {
-				errors <- fmt.Errorf("Could not parse folder %s!", fName)
+				atomic.AddUint64(&errors, 1)
+				log.Printf("Could not parse folder %s!", fName)
 				return
 			}
 			var parentName, childName string
@@ -54,58 +56,71 @@ func consolidateFolders(flags Flags, inDirName, outDirName string) (err error) {
 
 			for _, v := range flags.IgnoredParents {
 				if strings.Contains(parentName, v) && v != "" {
-					ignored++
-					errors <- nil
+					atomic.AddUint64(&ignored, 1)
 					return
 				}
 			}
 
 			for _, v := range flags.IgnoredChildren {
 				if strings.Contains(childName, v) && v != "" {
-					ignored++
-					errors <- nil
+					atomic.AddUint64(&ignored, 1)
 					return
 				}
 			}
 
-			src, _ := filepath.Abs(filepath.Join(inDirName, f.Name()))
-			destParent, _ := filepath.Abs(filepath.Join(outDirName, parentName))
-			dest, _ := filepath.Abs(filepath.Join(outDirName, parentName, childName))
+			src, err := filepath.Abs(filepath.Join(inDirName, f.Name()))
+			if err != nil {
+				atomic.AddUint64(&errors, 1)
+				log.Printf("Could not parse folder %s! %s", fName, err)
+				return
+			}
+			destParent, err := filepath.Abs(filepath.Join(outDirName, parentName))
+			if err != nil {
+				atomic.AddUint64(&errors, 1)
+				log.Printf("Could not parse folder %s! %s", parentName, err)
+				return
+			}
+			dest, err := filepath.Abs(filepath.Join(outDirName, parentName, childName))
+			if err != nil {
+				atomic.AddUint64(&errors, 1)
+				log.Printf("Could not parse folder %s! %s", childName, err)
+				return
+			}
 
 			if err = os.MkdirAll(destParent, f.Mode()); err != nil {
+				atomic.AddUint64(&errors, 1)
+				log.Printf("Could not create destination folder %s! %s", destParent, err)
 				return
 			}
 
 			destInfo, err := os.Lstat(dest)
 			if err != nil && !os.IsNotExist(err) {
-				errors <- err
+				atomic.AddUint64(&errors, 1)
+				log.Printf("Destination not created! %s", err)
 				return
 			}
 			//If a symlink is already there, just delete it
 			if destInfo != nil && destInfo.Mode()&os.ModeSymlink != 0 {
 				if err := os.Remove(dest); err != nil {
-					errors <- err
+					atomic.AddUint64(&errors, 1)
+					log.Printf("Failed to create symlink! %s", err)
 					return
 				}
 			}
 
 			if err := os.Symlink(src, dest); err != nil {
-				errors <- fmt.Errorf("\nError symlinking dir %s to %s!\nError:%s", src, dest, err)
+				atomic.AddUint64(&errors, 1)
+				log.Printf("\nError symlinking dir %s to %s!\nError:%s", src, dest, err)
 				return
 			}
-			// log.Printf("Successfully linked to %s!", dest)
-			errors <- nil
+			atomic.AddUint64(&successes, 1)
 		}(f)
 	}
-	errCount := 0
-	for i := 0; i < len(files); i++ {
-		e := <-errors
-		if e != nil {
-			errCount++
-			log.Print(e)
-		}
+	//wait for goroutines to finish
+	for atomic.LoadUint64(&ignored)+atomic.LoadUint64(&errors)+atomic.LoadUint64(&successes) < uint64(len(files)) {
+		time.Sleep(10 * time.Millisecond)
 	}
-	log.Printf("Linked %d folders with %d errors!", len(files)-ignored-errCount, errCount)
+	log.Printf("Finished linking %d folders! Ignored: %d Errors: %d ", successes, ignored, errors)
 	return
 }
 
